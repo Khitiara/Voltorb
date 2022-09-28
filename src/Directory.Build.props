@@ -1,0 +1,7 @@
+<Project>
+    <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
+    <ItemGroup>
+        <KnownTestSuffix Include="Common;Unit;Integration"/>
+        <InternalsVisibleTo Include="@(KnownTestSuffix->'$(AssemblyName).Tests.%(Identity)')"/>
+    </ItemGroup>
+</Project>
