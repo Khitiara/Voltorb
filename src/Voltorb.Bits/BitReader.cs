@@ -3,8 +3,8 @@
 /// <summary>
 /// A stream wrapper to support reading individual bits from a <see cref="Stream"/>.
 /// Note this class maintains some internal buffering of necessity, and thus should not be used concurrently with other
-/// reading methods - if bit reading is necessary for a sub-sequence of read data a <see cref="MemoryStream"/> should be
-/// used to back this, or else manual bitwise operation
+/// reading methods - if bit reading is necessary for only a sub-sequence of read data then care should be taken to
+/// ensure that the state of this reader has been advanced to a whole-byte boundary
 /// </summary>
 public sealed class BitReader
 {
@@ -39,6 +39,7 @@ public sealed class BitReader
             case 0:
                 return 0UL;
         }
+
         (count, ulong bits) = await PeekBitsAsync(count);
         await AdvanceAsync(count);
         return bits;
@@ -65,9 +66,12 @@ public sealed class BitReader
                 return (_bitsAvailable, _bitBucket);
             }
 
-            _bitBucket |= (ulong)(b & 0xFF) << _bitsAvailable;
+            if (_bitsAvailable > 0)
+                _bitBucket |= (ulong)(b & 0xFF) << _bitsAvailable;
+            else
+                _bitBucket |= (ulong)(b & 0xFF) >> -_bitsAvailable;
             _bitsAvailable += 8;
-            
+
             // As count is at most 64, when this line executes _bitsAvailable is at most 72 and such the overflow bits
             // (if any exist) fit in a single byte
             if (_bitsAvailable > 64) {
@@ -92,9 +96,9 @@ public sealed class BitReader
     /// <param name="count">The number of bits to advance past</param>
     /// <returns><c>true</c> if the requested number of bits were drained, <c>false</c> otherwise</returns>
     public async ValueTask<bool> AdvanceAsync(int count) {
-        // cant go backwards
-        if(count < 0) return true;
-        
+        // cant go backwards and going nowhere is a nop
+        if (count <= 0) return true;
+
         // we have enough bits already buffered for a discard, no I/O will be performed and there will be leftover bits
         if (count < _bitsAvailable) {
             // if count >= 64 then the entire bit bucket may be discarded by storing 0
@@ -113,21 +117,22 @@ public sealed class BitReader
                 int shift = 64 - count;
                 _bitBucket |= shift > 0 ? (ulong)_overflowBits << shift : (ulong)_overflowBits >> -shift;
 
-                if (_bitsAvailable - 64 > count)
-                {
+                if (_bitsAvailable - 64 > count) {
                     // if theres still overflow bits somehow after stuff gets shifted down then we shift stored overflow
                     _overflowBits >>= count;
                 }
             }
+
             // mark bits as discarded
             _bitsAvailable -= count;
             return true;
-        } 
+        }
+
         // count >= _bitsAvailable
         count -= _bitsAvailable;
         _bitsAvailable = 0;
         _bitBucket = 0;
-        if(count <= 0) return true;
+        if (count <= 0) return true;
 
         // count > _bitsAvailable, start draining to discard full bytes
         while (count > 8) {
@@ -146,5 +151,38 @@ public sealed class BitReader
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Seek in the stream a certain signed number of bits relative to the specified seek origin.
+    /// This method will never perform a read operation, instead manipulating internal state to facilitate seeking
+    /// a non-whole number of bytes
+    /// </summary>
+    public void Seek(long relBits, SeekOrigin origin) {
+        if (relBits < 0) // backwards seek, take out available bits first
+            relBits += _bitsAvailable;
+        else // forwards seek, short-circuit skip the available bits
+            relBits -= _bitsAvailable;
+
+        // split given bits into bytes and bits. this can probably be made more efficient with bitwise ops
+        // but im not awake enough to figure out the logic so meh
+        (long bytes, long rem) = Math.DivRem(relBits, 8);
+
+        // if going backwards a non-whole number of bytes, then go back further and adjust the remainder to be positive
+        // e.g. -11 -> -1, -3 -> -2, +5
+        // since we're aligned at a byte boundary at this point, this cannot result in seeking past the beginning of
+        // the stream in cases where such would not already logically happen, so this is valid and allows skipping the
+        // extra bits needed after we finish
+        if (bytes < 0 && rem != 0) {
+            bytes--;
+            rem += 8;
+        }
+
+        // if we have to skip some bits forward, then setting _bitsAvailable to the negative of that number will force
+        // PeekBitsAsync and AdvanceAsync will read extra bits from the stream when used and avoid performing a read
+        _bitsAvailable = (int)-rem;
+
+        // Actually seek some number of bits
+        _stream.Seek(bytes, origin);
     }
 }
