@@ -12,15 +12,18 @@ public sealed class BitReader
     private          int    _bitsAvailable;
     private          byte   _overflowBits;
     private readonly Stream _stream;
+    private readonly byte[] _singleByteReadBuffer = new byte[1];
 
     public BitReader(Stream stream) {
         _stream = stream;
     }
-
-    private async ValueTask<short> ReadNextByteAsync() {
-        byte[] buf = new byte[1];
-        return await _stream.ReadAsync(buf) < 1 ? (short)-1 : buf[0];
-    }
+    
+    /// <summary>
+    /// simple wrapper to read one byte from the stream asynchronously, equivalent to Stream.ReadByte
+    /// but asynchronous returns a short to support returning -1 in the end-of-stream case
+    /// </summary>
+    private async ValueTask<short> ReadNextByteAsync() =>
+        await _stream.ReadAsync(_singleByteReadBuffer) < 1 ? (short)-1 : _singleByteReadBuffer[0];
 
     /// <summary>
     /// Reads a single bit from the stream and returns it, interpreted as a bool
@@ -41,6 +44,9 @@ public sealed class BitReader
         }
 
         (count, ulong bits) = await PeekBitsAsync(count);
+        // since we already peeked the bits and count <= 64, count <= _bitsAvailable and
+        // advance must complete synchronously. ValueTask facilitates avoiding unnecessary
+        // allocation here so extracting the synchronous part of AdvanceAsync is unnecessary
         await AdvanceAsync(count);
         return bits;
     }
@@ -66,20 +72,22 @@ public sealed class BitReader
                 return (_bitsAvailable, _bitBucket);
             }
 
-            if (_bitsAvailable > 0)
+            if (_bitsAvailable > 0) // shift the new bits into the current bucket
                 _bitBucket |= (ulong)(b & 0xFF) << _bitsAvailable;
-            else
+            else // we have a pending skip from Seek, shift out the skipped bits
                 _bitBucket |= (ulong)(b & 0xFF) >> -_bitsAvailable;
+            // note the newly read bits
             _bitsAvailable += 8;
 
-            // As count is at most 64, when this line executes _bitsAvailable is at most 72 and such the overflow bits
-            // (if any exist) fit in a single byte
+            // As count is at most 64, when this line executes _bitsAvailable ranges from 65 to 72 and thus
+            // 72 - _bitsAvailable ranges from 0 to 7, and the right shift leaves at least one bit in the overflow
             if (_bitsAvailable > 64) {
                 _overflowBits = (byte)(b >> (72 - _bitsAvailable));
                 break;
             }
         }
 
+        // temporary value so non-requested bits may be discarded
         ulong value = _bitBucket;
         if (count < 64) {
             // Mask off un-requested bits
@@ -123,18 +131,21 @@ public sealed class BitReader
                 }
             }
 
-            // mark bits as discarded
+            // mark bits as discarded - we no longer need the original _bitsAvailable value as the bit buffer has
+            // already had the discarded bits removed 
             _bitsAvailable -= count;
             return true;
         }
 
-        // count >= _bitsAvailable
+        // count >= _bitsAvailable, discard the buffered information completely for efficiency
         count -= _bitsAvailable;
         _bitsAvailable = 0;
         _bitBucket = 0;
-        if (count <= 0) return true;
+        
+        // if count was exactly _bitsAvailable, then we're done
+        if (count == 0) return true;
 
-        // count > _bitsAvailable, start draining to discard full bytes
+        // count > _bitsAvailable, start reading to discard full bytes
         while (count > 8) {
             if (await ReadNextByteAsync() == -1)
                 return false;
