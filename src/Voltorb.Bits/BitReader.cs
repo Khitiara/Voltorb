@@ -17,7 +17,7 @@ public sealed class BitReader
     public BitReader(Stream stream) {
         _stream = stream;
     }
-    
+
     /// <summary>
     /// simple wrapper to read one byte from the stream asynchronously, equivalent to Stream.ReadByte
     /// but asynchronous returns a short to support returning -1 in the end-of-stream case
@@ -123,7 +123,9 @@ public sealed class BitReader
                 // When count <= 64, overflow values are left shifted to avoid modifying the remaining main bits
                 // otherwise, overflow values are right shifted to discard the remainder of count - 64
                 int shift = 64 - count;
-                _bitBucket |= shift > 0 ? (ulong)_overflowBits << shift : (ulong)_overflowBits >> -shift;
+                _bitBucket |= shift > 0 
+                    ? (ulong)_overflowBits << shift 
+                    : (ulong)_overflowBits >> -shift;
 
                 if (_bitsAvailable - 64 > count) {
                     // if theres still overflow bits somehow after stuff gets shifted down then we shift stored overflow
@@ -141,7 +143,7 @@ public sealed class BitReader
         count -= _bitsAvailable;
         _bitsAvailable = 0;
         _bitBucket = 0;
-        
+
         // if count was exactly _bitsAvailable, then we're done
         if (count == 0) return true;
 
@@ -170,10 +172,14 @@ public sealed class BitReader
     /// a non-whole number of bytes
     /// </summary>
     public void Seek(long relBits, SeekOrigin origin) {
-        if (relBits < 0) // backwards seek, take out available bits first
-            relBits += _bitsAvailable;
-        else // forwards seek, short-circuit skip the available bits
-            relBits -= _bitsAvailable;
+        if (origin == SeekOrigin.Current)
+            if (relBits < 0) // backwards seek, take out available bits first
+                relBits += _bitsAvailable;
+            else // forwards seek, short-circuit skip the available bits
+                relBits -= _bitsAvailable;
+        
+        if(relBits == 0 && origin == SeekOrigin.Current)
+            return;
 
         // split given bits into bytes and bits. this can probably be made more efficient with bitwise ops
         // but im not awake enough to figure out the logic so meh
@@ -184,7 +190,7 @@ public sealed class BitReader
         // since we're aligned at a byte boundary at this point, this cannot result in seeking past the beginning of
         // the stream in cases where such would not already logically happen, so this is valid and allows skipping the
         // extra bits needed after we finish
-        if (bytes < 0 && rem != 0) {
+        if (relBits < 0 && rem != 0) {
             bytes--;
             rem += 8;
         }
@@ -192,7 +198,7 @@ public sealed class BitReader
         // if we have to skip some bits forward, then setting _bitsAvailable to the negative of that number will force
         // PeekBitsAsync and AdvanceAsync will read extra bits from the stream when used and avoid performing a read
         _bitsAvailable = (int)-rem;
-
+        
         // Actually seek some number of bits
         _stream.Seek(bytes, origin);
     }
