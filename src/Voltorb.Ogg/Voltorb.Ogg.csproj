@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <PackageReference Include="Nerdbank.Streams" Version="2.9.112" />
+    <PackageReference Include="System.IO.Hashing" Version="7.0.0-rc.1.22426.10" />
   </ItemGroup>
 </Project>

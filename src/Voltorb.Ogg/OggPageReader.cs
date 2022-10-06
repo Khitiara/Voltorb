@@ -1,130 +1,159 @@
 ﻿using System.Buffers;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
-using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
+using System.IO.Hashing;
 using System.Runtime.InteropServices;
 using Nerdbank.Streams;
 
 namespace Voltorb.Ogg;
 
-/// <summary>
-/// Allows efficient direct reading of Ogg pages from a fixed sequence, with no built-in support for demultiplexing.
-/// Read continuation is supported by passing an <see cref="OggReaderState"/> to the constructors of this type.
-///
-/// Most users should not expect to use this type directly; instead <see cref="OggDemultiplexingReader"/> should be
-/// preferred for most use cases.
-/// </summary>
-public ref struct OggPageReader
+public class OggPageReader
 {
-    private SequenceReader<byte> _reader;
-    private OggReaderState       _state;
-
-    public OggPageReader(ReadOnlySequence<byte> seq, OggReaderState state = default) {
-        _state = state;
-        _reader = new SequenceReader<byte>(seq);
-    }
-
-    public OggPageReader(ReadOnlySpan<byte> span, OggReaderState state = default) {
-        _state = state;
-        Sequence<byte> seq = new();
-        seq.Write(span);
-        _reader = new SequenceReader<byte>(seq);
-    }
-
-    public readonly OggReaderState State => _state;
-
-    public SequenceReader<byte> Reader => _reader;
-
-    public IReadOnlyList<int> PacketLengths => new ReadOnlyCollection<int>(State.PacketLengths);
+    public readonly record struct PageInfo(ulong GranulePosition, uint BitstreamSerial, uint PageSequenceNumber,
+        HeaderType PacketType, long SeekPosition, int[] PacketLengths, bool FinalPacketIsComplete);
 
     /// <summary>
-    /// Attempt to read an Ogg page header from the current sequence. A partially read page header will be filled out
-    /// with available data in the case of a reader initialized with a <see cref="OggReaderState"/>, and any completely
-    /// read page metadata will be discarded before searching for the next page.
-    ///
-    /// If this method returns false, <see cref="State"/> should be used to construct a new <see cref="OggPageReader"/>
-    /// with additional data when available and this method called again.
+    /// Ogg page data, including metadata recovered from the header as well as a segmented buffer of page data bits
+    /// allocated from the <see cref="MemoryPool{Byte}"/> the source <see cref="OggPageReader"/> was initialized with
     /// </summary>
-    /// <returns>True if a new page header could be found and read fully, false otherwise</returns>
-    /// <remarks>
-    /// If this method returns true, <see cref="Reader"/> is guaranteed to be positioned at the start of the first
-    /// segment of data within the current page and <see cref="PacketLengths"/> are guaranteed to return valid
-    /// information about the current page.
-    /// </remarks>
-    public bool TryReadHeader() {
-        if (_state.CurrentStage == OggReaderState.Stage.Data) {
-            _state = default;
+    /// <param name="PageInfo">Retrieved page metadata</param>
+    /// <param name="PageBits">The binary data associated with this page, which remains valid until this instance is disposed</param>
+    public sealed record PageData(PageInfo PageInfo, Sequence<byte> PageBits) : IDisposable
+    {
+        public ulong GranulePosition => PageInfo.GranulePosition;
+        public uint BitstreamSerial => PageInfo.BitstreamSerial;
+        public uint PageSequenceNumber => PageInfo.PageSequenceNumber;
+        public HeaderType PacketType => PageInfo.PacketType;
+        public long SeekPosition => PageInfo.SeekPosition;
+        public int[] PacketLengths => PageInfo.PacketLengths;
+        public bool FinalPacketIsComplete => PageInfo.FinalPacketIsComplete;
+
+        public void Dispose() {
+            PageBits.Dispose();
         }
-
-        while (_state.CurrentStage != OggReaderState.Stage.Data) {
-            switch (_state.CurrentStage) {
-                case OggReaderState.Stage.Capture:
-                    // Quick check here in the likely case that we are sitting right at the start of a valid ogg page
-                    if (_reader.IsNext(OggConstants.CapturePattern))
-                        _reader.Advance(OggConstants.CapturePattern.Length);
-                    else if (!_reader.TryReadTo(out ReadOnlySequence<byte> _, OggConstants.CapturePattern)) 
-                        return false;
-
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.Version:
-                    if (!_reader.TryRead(out _state.StreamStructureVersion)) return false;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.Type:
-                    // wait this unsafe shit is allowed???
-                    if (!_reader.TryRead(out Unsafe.As<OggReaderState.HeaderType, byte>(ref _state.PageType)))
-                        return false;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.GranulePosition:
-                    if (!SequenceMarshal.TryRead(ref _reader, out _state.GranulePosition))
-                        return false;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.StreamSerialNumber:
-                    if (!SequenceMarshal.TryRead(ref _reader, out _state.BitstreamSerialNumber))
-                        return false;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.SequenceNumber:
-                    if (!SequenceMarshal.TryRead(ref _reader, out _state.PageSequenceNumber))
-                        return false;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.CrcChecksum:
-                    if (!SequenceMarshal.TryRead(ref _reader, out _state.Checksum))
-                        return false;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.NumPageSegments:
-                    if (!_reader.TryRead(out byte numPageSegments)) return false;
-                    _state.PageSegments = new byte[numPageSegments];
-                    _state.SegmentsRemaining = numPageSegments;
-                    _state.CurrentStage++;
-                    break;
-                case OggReaderState.Stage.SegmentTable:
-                    int toRead = Math.Min(_state.SegmentsRemaining, (int)_reader.Remaining);
-                    _reader.TryCopyTo(_state.PageSegments.AsSpan(_state.SegmentsIndex, toRead));
-                    _reader.Advance(_state.SegmentsIndex += toRead);
-                    // if the final segmentsread value is nonzero then theres more to read still, return false and wait
-                    // for more data. the segmentsindex value gives an offset to read to so no overwriting will happen
-                    if ((_state.SegmentsRemaining -= toRead) > 0)
-                        return false;
-                    // reset index for use in packet indexing
-                    _state.SegmentsIndex = 0;
-                    _state.CurrentStage++;
-                    GetPacketLengths(_state.PageSegments!, out _state.PacketLengths, out _state.LastPacketIsComplete);
-                    break;
-                case OggReaderState.Stage.Data:
-                    throw new UnreachableException();
-                default:
-                    throw new ArgumentOutOfRangeException();
-            }
-        }
-
-        return true;
     }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private readonly struct PageHeader
+    {
+        internal readonly byte       Version;
+        internal readonly HeaderType Flags;
+        internal readonly ulong      GranulePosition;
+        internal readonly uint       BitstreamSerial;
+        internal readonly uint       PageSequence;
+        internal readonly uint       CrcChecksum;
+        internal readonly byte       PageSegmentCount;
+    }
+
+
+    private readonly Stream           _stream;
+    private readonly MemoryPool<byte> _memoryPool;
+    private readonly List<PageInfo>   _pageOffsetTable;
+    private readonly Crc32            _crc;
+
+    /// <summary>
+    /// Allows access to metadata about all pages this reader has encountered.
+    /// </summary>
+    public IReadOnlyList<PageInfo> SeenPages { get; }
+
+    public OggPageReader(Stream stream, MemoryPool<byte> memoryPool) {
+        _stream = stream;
+        _memoryPool = memoryPool;
+        _pageOffsetTable = new List<PageInfo>();
+        _crc = new Crc32();
+        SeenPages = new ReadOnlyCollection<PageInfo>(_pageOffsetTable);
+    }
+
+    /// <inheritdoc cref="Stream.CanSeek"/>
+    public bool CanSeek => _stream.CanSeek;
+
+    /// <summary>
+    /// Seek to and read the page of given index within the source stream.
+    /// When this method completes, page data for all pages preceding the given page index will be available in
+    /// <see cref="PageInfo"/>, in addition to data about the page seeked to.
+    ///
+    /// <see cref="ReadPageAsync"/> for more about page reading semantics.
+    /// </summary>
+    public async ValueTask<PageData> SeekAndReadPageAsync(int pageIndex, CancellationToken cancellationToken = default) {
+        if (pageIndex < _pageOffsetTable.Count) {
+            _stream.Seek(_pageOffsetTable[pageIndex].SeekPosition, SeekOrigin.Begin);
+            return await ReadPageAsyncCore(pageIndex, cancellationToken);
+        }
+
+        _pageOffsetTable.EnsureCapacity(pageIndex);
+        for (int i = _pageOffsetTable.Count; i < pageIndex; i++) {
+            await ReadPageAsyncCore(i, cancellationToken);
+        }
+
+        return await ReadPageAsyncCore(pageIndex, cancellationToken);
+    }
+
+
+    /// <summary>
+    /// Read through the next ogg page in the source stream, discarding any remaining data before the page starts.
+    /// Page metadata and data bits are accessible through the returned <see cref="PageData"/> and will be checked
+    /// with the ogg page CRC for corruption.
+    ///
+    /// If re-reading a previously read page after a seek operation, the page header will still be re-read and metadata
+    /// updated, as well as the checksum re-verified for the page.
+    /// </summary>
+    public ValueTask<PageData> ReadPageAsync(CancellationToken cancellationToken = default) =>
+        ReadPageAsyncCore(_pageOffsetTable.Count, cancellationToken);
+
+    [SuppressMessage("Style", "VSTHRD200:Use \"Async\" suffix for async methods")]
+    private async ValueTask<PageData> ReadPageAsyncCore(int idx, CancellationToken cancellationToken = default) {
+        Sequence<byte> sequenceForCrc = new(_memoryPool);
+        PageHeader header;
+        using (IMemoryOwner<byte> rental = _memoryPool.Rent(23)) {
+            int indexOf;
+            int count;
+            Memory<byte> memory = rental.Memory;
+            do {
+                count = await _stream.ReadAtLeastAsync(memory, OggConstants.CapturePattern.Length,
+                    cancellationToken:
+                    cancellationToken);
+            } while ((indexOf = memory.Span[..count].IndexOf(OggConstants.CapturePattern)) < 0);
+
+            Memory<byte> slice = memory[(indexOf + 4)..count];
+            int offset = slice.Length;
+            slice.CopyTo(memory);
+            await _stream.ReadExactlyAsync(memory[offset..], cancellationToken);
+            header = MemoryMarshal.Read<PageHeader>(memory.Span);
+            memory.Span[22..25].Fill(0);
+            sequenceForCrc.Write(memory.Span);
+        }
+
+        long streamPosition = _stream.Position - 27;
+
+        byte[] lacingValues = new byte[header.PageSegmentCount];
+        await _stream.ReadExactlyAsync(lacingValues, cancellationToken);
+
+        sequenceForCrc.Write(lacingValues);
+
+        GetPacketLengths(lacingValues, out int[] packets, out bool lastPacketIsComplete);
+        int pageDataLength = packets.Sum();
+        SequencePosition dataStartPos = sequenceForCrc.AsReadOnlySequence.End;
+        await _stream.ReadSlice(pageDataLength).CopyToAsync(sequenceForCrc.AsStream(), cancellationToken);
+        foreach (ReadOnlyMemory<byte> memory in sequenceForCrc.AsReadOnlySequence) {
+            _crc.Append(memory.Span);
+        }
+
+        uint crc = 0;
+        _crc.GetHashAndReset(MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref crc, 1)));
+        if (crc != header.CrcChecksum)
+            throw new IOException();
+
+        sequenceForCrc.AdvanceTo(dataStartPos);
+        PageInfo pageInfo = new(header.GranulePosition, header.BitstreamSerial, header.PageSequence, header.Flags,
+            streamPosition, packets, lastPacketIsComplete);
+        if (idx < 0 || idx >= _pageOffsetTable.Count)
+            _pageOffsetTable.Add(pageInfo);
+        else
+            _pageOffsetTable[idx] = pageInfo;
+
+        return new PageData(pageInfo, sequenceForCrc);
+    }
+
 
     /// <summary>
     /// Turns a list of segment lacing values into a list of (partial) packet lengths.
