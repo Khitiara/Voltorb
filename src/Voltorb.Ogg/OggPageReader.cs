@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.ObjectModel;
 using System.IO.Hashing;
 using System.Runtime.InteropServices;
@@ -250,9 +251,8 @@ public class OggPageReader : IDisposable
                     _crc.Append(segment.Span);
                 }
 
-                uint crc = 0;
-                _crc.GetHashAndReset(MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref crc, 1)));
-                if (crc != header.CrcChecksum)
+
+                if (BinaryPrimitives.ReadUInt32BigEndian(_crc.GetHashAndReset()) != header.CrcChecksum)
                     throw new IOException(); // TODO add an exception message here. is this the right exception type?
             }
         }
