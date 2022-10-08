@@ -21,7 +21,7 @@ public static class BitReaderExtensions
         // since we already peeked the bits and count <= 64, count <= _bitsAvailable and
         // advance must complete synchronously. ValueTask facilitates avoiding unnecessary
         // allocation here so extracting the synchronous part of AdvanceAsync is unnecessary
-        b.Advance(c);
+        b.TryAdvance(c);
         return bits;
     }
 

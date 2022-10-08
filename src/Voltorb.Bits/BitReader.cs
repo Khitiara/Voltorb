@@ -4,12 +4,24 @@ namespace Voltorb.Bits;
 
 /// <summary>
 /// A wrapper to support reading individual bits from a <see cref="SequenceReader{Byte}"/>.
+///
+/// Bits are read LSb first; i.e. the byte 0xEB = 0b11101011 would be read in the order 1,1,0,1,0,1,1,1
+/// When reading multiple bits at a time from the bitstream, they are packed in that order as well, so reading 5 bits
+/// from the above example would yield 0b01011 = 0x0B 
+/// 
 /// Note this class maintains some internal buffering of necessity, and thus should not be used concurrently with other
 /// reading methods - if bit reading is necessary for only a sub-sequence of read data then care should be taken to
 /// ensure that the state of this reader has been advanced to a whole-byte boundary
 /// </summary>
 public ref struct BitReader
 {
+    /// <summary>
+    /// up to 64 bits which have been read from the source sequence but not yet advanced past and thus may be
+    /// accessed freely. the number of valid bits in this field is stored in <see cref="_bitsAvailable"/>
+    /// semantically, a bitsavailable of e.g. 5 means that _bitBucket & 0b11111 is valid information.
+    /// if bitsavailable is nonpositive, the value of this field is unreliable; this state is resolved immediately
+    /// when <see cref="PeekBits"/> or <see cref="TryAdvance"/> are executed and may only occur after a seek operation
+    /// </summary>
     private ulong _bitBucket;
 
     /// <summary>
@@ -45,7 +57,7 @@ public ref struct BitReader
     /// <param name="count">The number of bits to peek</param>
     /// <param name="bits">The value of bits successfully peeked</param>
     /// <exception cref="ArgumentOutOfRangeException">When <paramref name="count"/> is less than 0 or more than 64</exception>
-    public void PeekBits(scoped ref int count, out ulong bits) {
+    public void PeekBits(scoped ref int count, scoped out ulong bits) {
         // my IDE reallllly does not like the scoped keyword
         switch (count) {
             case < 0 or > 64:
@@ -54,6 +66,22 @@ public ref struct BitReader
                 bits = 0ul;
                 count = 0;
                 return;
+        }
+
+        // if we are at a negative _bitsAvailable, shorten the below loop using advance until we need to skip less than
+        // 8 bits. e.g. if _bitsAvailable is 17 then we advance 2 and leave _bitsAvailable at -1, the loop below will 
+        // then read one more byte leaving us at 7 bits available and proceed as needed
+        if (_bitsAvailable < -8) {
+            (int bytes, _bitsAvailable) = Math.DivRem(_bitsAvailable, 8);
+            bytes = -bytes;
+
+            if (_stream.Remaining < bytes + 1) {
+                count = 0;
+                bits = 0UL;
+                return;
+            }
+
+            _stream.Advance(bytes);
         }
 
         // Read more bits in, 8 at a time, until either end of stream or we have enough. 
@@ -90,12 +118,11 @@ public ref struct BitReader
     }
 
     /// <summary>
-    /// Advance the read pointer <paramref name="count"/> bits, draining data asynchronously from the source stream if
-    /// necessary
+    /// Advance the read pointer <paramref name="count"/> bits
     /// </summary>
     /// <param name="count">The number of bits to advance past</param>
     /// <returns><c>true</c> if the requested number of bits were drained, <c>false</c> otherwise</returns>
-    public bool Advance(int count) {
+    public bool TryAdvance(int count) {
         // cant go backwards and going nowhere is a nop
         if (count <= 0) return true;
 
@@ -133,27 +160,12 @@ public ref struct BitReader
         _bitsAvailable = 0;
         _bitBucket = 0;
 
-        // if count was exactly _bitsAvailable, then we're done
-        if (count == 0) return true;
+        // round up bytes needed and check if we've enough
+        if ((count + 8 - count % 8) / 8 > _stream.Remaining)
+            return false;
 
-        // count > _bitsAvailable, advance the reader to discard. use SequenceReader.Remaining to return false early
-        // and advance using sequencereader itself instead of discarding individual bytes
-        if (count > 8) {
-            int bytes = count / 8;
-            if (bytes > _stream.Remaining)
-                return false;
-            _stream.Advance(bytes);
-            count %= 8;
-        }
-
-        // Partial byte needed, retrieve and partial discard
-        if (count > 0) {
-            if (!_stream.TryRead(out byte tmp))
-                return false;
-            _bitBucket = (ulong)(tmp >> count);
-            _bitsAvailable = 8 - count;
-        }
-
+        // set negative _bitsAvailable by the same logic as seek. peekbits will advance the sequence as needed
+        _bitsAvailable = -count;
         return true;
     }
 
@@ -166,7 +178,7 @@ public ref struct BitReader
         // we cant seek forward from the end obv
         if (origin == SeekOrigin.End && relBits > 0)
             throw new ArgumentOutOfRangeException(nameof(relBits), relBits, "");
-        
+
         if (origin == SeekOrigin.Current) {
             // move the logical read head to match the physical one and adjust the seek amount to compensate
             relBits -= _bitsAvailable;
