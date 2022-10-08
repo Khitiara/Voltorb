@@ -44,7 +44,7 @@ public class OggPageReader : IDisposable
     /// that packet's data, possibly requiring even further continuation.
     /// </param>
     public readonly record struct PageInfo(ulong GranulePosition, uint BitstreamSerial, uint PageSequenceNumber,
-        HeaderType PacketType, uint CrcChecksum, long SeekPosition, int[] PacketLengths,
+        HeaderType PacketType, uint CrcChecksum, long SeekPosition, int[] PacketLengths, int PageIndex,
         bool FinalPacketIsComplete);
 
     /// <summary>
@@ -62,6 +62,7 @@ public class OggPageReader : IDisposable
         public uint CrcChecksum => PageInfo.CrcChecksum;
         public long SeekPosition => PageInfo.SeekPosition;
         public int[] PacketLengths => PageInfo.PacketLengths;
+        public int PageIndex => PageInfo.PageIndex;
         public bool FinalPacketIsComplete => PageInfo.FinalPacketIsComplete;
 
         public void Dispose() {
@@ -115,8 +116,8 @@ public class OggPageReader : IDisposable
     ///
     /// <see cref="ReadPageAsync"/> for more about page reading semantics.
     /// </summary>
-    public async ValueTask<PageData>
-        SeekAndReadPageAsync(int pageIndex, CancellationToken cancellationToken = default) {
+    public async ValueTask<PageData> SeekAndReadPageAsync(int pageIndex, 
+        CancellationToken cancellationToken = default) {
         if (pageIndex < _pageOffsetTable.Count) {
             // we already know where the page is, seek to the start of the capture pattern and read it
             _stream.Seek(_pageOffsetTable[pageIndex].SeekPosition, SeekOrigin.Begin);
@@ -137,6 +138,13 @@ public class OggPageReader : IDisposable
 
         return await ReadPageAsync(cancellationToken: cancellationToken);
     }
+
+    /// <summary>
+    /// Raised when a page non-contiguity is detected (a page start not occurring immediately after the previous page
+    /// or the start of the stream), to be used by calling code to detect and react to such errors and prevent possible
+    /// packet corruption or data loss.
+    /// </summary>
+    public event Func<Task>? PageNonContiguity;
 
 
     /// <summary>
@@ -202,6 +210,10 @@ public class OggPageReader : IDisposable
             foundCapturePattern = (indexOf = memory.Span[..(count + 3)].IndexOf(OggConstants.CapturePattern)) < 0;
         } while (!foundCapturePattern);
 
+        if (indexOf != 3) {
+            OnPageNonContiguityAsync();
+        }
+
         // slice everything after the capture pattern. since indexof returned >=0 on the capture pattern, this will not
         // overrun, but may return an empty slice. offset will be 0 in that case, and we'll overwrite the capture
         // pattern with the second stream read rather than call into CopyTo
@@ -266,7 +278,7 @@ public class OggPageReader : IDisposable
         // the page table, but manually seeking to before the corrupted entry and re-reading pages from there will
         // restore the setup
         PageInfo pageInfo = new(header.GranulePosition, header.BitstreamSerial, header.PageSequence, header.Flags,
-            header.CrcChecksum, streamPosition, packets, lastPacketIsComplete);
+            header.CrcChecksum, streamPosition, packets, _currentPageIndex, lastPacketIsComplete);
         if (_currentPageIndex < 0 || _currentPageIndex >= _pageOffsetTable.Count) {
             _pageOffsetTable.Add(pageInfo);
             _currentPageIndex++;
@@ -318,5 +330,11 @@ public class OggPageReader : IDisposable
     public void Dispose() {
         Dispose(true);
         GC.SuppressFinalize(this);
+    }
+
+    protected virtual async ValueTask OnPageNonContiguityAsync() {
+        await Task.WhenAll(PageNonContiguity?.GetInvocationList()
+            ?.Cast<Func<Task>>()
+            ?.Select(f => f()) ?? Enumerable.Empty<Task>());
     }
 }
