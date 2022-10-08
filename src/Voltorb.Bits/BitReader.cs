@@ -40,13 +40,6 @@ public ref struct BitReader
     public long Position => 8 * _stream.Consumed - _bitsAvailable;
 
     /// <summary>
-    /// simple wrapper to read one byte from the sequence, returning -1 on a failure via a short to mimic
-    /// the semantics of <see cref="Stream.ReadByte"/>
-    /// </summary>
-    private short ReadNextByte() =>
-        _stream.TryRead(out byte b) ? b : (short)-1;
-
-    /// <summary>
     /// Peek up to the specified number of bits ahead
     /// </summary>
     /// <param name="count">The number of bits to peek</param>
@@ -65,8 +58,7 @@ public ref struct BitReader
 
         // Read more bits in, 8 at a time, until either end of stream or we have enough. 
         while (_bitsAvailable < count) {
-            short b;
-            if ((b = ReadNextByte()) < 0) {
+            if (!_stream.TryRead(out byte b)) {
                 count = _bitsAvailable;
                 bits = _bitBucket;
                 return;
@@ -107,7 +99,7 @@ public ref struct BitReader
         // cant go backwards and going nowhere is a nop
         if (count <= 0) return true;
 
-        // we have enough bits already buffered for a discard, no I/O will be performed and there will be leftover bits
+        // we have enough bits already buffered for a discard, dont involve the sequence and there will be leftover bits
         if (count < _bitsAvailable) {
             // if count >= 64 then the entire bit bucket may be discarded by storing 0
             if (count > 63)
@@ -144,18 +136,20 @@ public ref struct BitReader
         // if count was exactly _bitsAvailable, then we're done
         if (count == 0) return true;
 
-        // count > _bitsAvailable, start reading to discard full bytes
-        while (count > 8) {
-            if (ReadNextByte() == -1)
+        // count > _bitsAvailable, advance the reader to discard. use SequenceReader.Remaining to return false early
+        // and advance using sequencereader itself instead of discarding individual bytes
+        if (count > 8) {
+            int bytes = count / 8;
+            if (bytes > _stream.Remaining)
                 return false;
-
-            count -= 8;
+            _stream.Advance(bytes);
+            count %= 8;
         }
 
         // Partial byte needed, retrieve and partial discard
         if (count > 0) {
-            short tmp = ReadNextByte();
-            if (tmp == -1) return false;
+            if (!_stream.TryRead(out byte tmp))
+                return false;
             _bitBucket = (ulong)(tmp >> count);
             _bitsAvailable = 8 - count;
         }
@@ -169,11 +163,17 @@ public ref struct BitReader
     /// a non-whole number of bytes
     /// </summary>
     public void Seek(long relBits, SeekOrigin origin) {
+        // we cant seek forward from the end obv
+        if (origin == SeekOrigin.End && relBits > 0)
+            throw new ArgumentOutOfRangeException(nameof(relBits), relBits, "");
+        
         if (origin == SeekOrigin.Current) {
+            // move the logical read head to match the physical one and adjust the seek amount to compensate
             relBits -= _bitsAvailable;
             _bitsAvailable = 0;
         }
 
+        // if theres nothin to do then theres nothin to do and return early
         if (relBits == 0 && origin == SeekOrigin.Current)
             return;
 
@@ -182,7 +182,7 @@ public ref struct BitReader
         (long bytes, long rem) = Math.DivRem(relBits, 8);
 
         // if going backwards a non-whole number of bytes, then go back further and adjust the remainder to be positive
-        // e.g. -11 -> -1, -3 -> -2, +5
+        // e.g. -11 -> (-1, -3) -> (-2, +5)
         // since we're aligned at a byte boundary at this point, this cannot result in seeking past the beginning of
         // the stream in cases where such would not already logically happen, so this is valid and allows skipping the
         // extra bits needed after we finish
@@ -195,27 +195,32 @@ public ref struct BitReader
         // PeekBitsAsync and AdvanceAsync will read extra bits from the stream when used and avoid performing a read
         _bitsAvailable = (int)-rem;
 
+        // finished adjusting the partial byte information. that being done, all thats left is to move the whole-byte
+        // read index 
         if (bytes == 0) return;
 
         // Actually seek some number of bits
         switch (origin) {
             case SeekOrigin.Begin:
-                if (bytes < _stream.Consumed)
+                // sequencereader has no reset so we calculate an offset and seek from the current position
+                if (bytes < _stream.Consumed) {
                     _stream.Rewind(_stream.Consumed - bytes);
-                else {
+                } else {
                     _stream.Advance(bytes - _stream.Consumed);
                 }
 
                 break;
             case SeekOrigin.Current:
-                if (bytes < 0)
+                if (bytes < 0) {
                     _stream.Rewind(-bytes);
-                else {
+                } else {
                     _stream.Advance(bytes);
                 }
 
                 break;
             case SeekOrigin.End:
+                // use the sequencereader to advance to the end and work backwards.
+                // seek forwards from end is invalid and thrown earlier
                 _stream.AdvanceToEnd();
                 _stream.Rewind(-bytes);
                 break;
