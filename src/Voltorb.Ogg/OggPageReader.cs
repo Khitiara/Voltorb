@@ -211,7 +211,7 @@ public class OggPageReader : IDisposable
         } while (!foundCapturePattern);
 
         if (indexOf != 3) {
-            OnPageNonContiguityAsync();
+            await OnPageNonContiguityAsync();
         }
 
         // slice everything after the capture pattern. since indexof returned >=0 on the capture pattern, this will not
