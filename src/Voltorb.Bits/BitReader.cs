@@ -1,81 +1,81 @@
-﻿namespace Voltorb.Bits;
+﻿using System.Buffers;
+
+namespace Voltorb.Bits;
 
 /// <summary>
-/// A stream wrapper to support reading individual bits from a <see cref="Stream"/>.
+/// A wrapper to support reading individual bits from a <see cref="SequenceReader{Byte}"/>.
 /// Note this class maintains some internal buffering of necessity, and thus should not be used concurrently with other
 /// reading methods - if bit reading is necessary for only a sub-sequence of read data then care should be taken to
 /// ensure that the state of this reader has been advanced to a whole-byte boundary
 /// </summary>
-public sealed class BitReader
+public ref struct BitReader
 {
-    private          ulong  _bitBucket;
-    private          int    _bitsAvailable;
-    private          byte   _overflowBits;
-    private readonly Stream _stream;
-    private readonly byte[] _singleByteReadBuffer = new byte[1];
+    private ulong _bitBucket;
 
-    public BitReader(Stream stream) {
+    /// <summary>
+    /// The number of bits buffered within this bitreader and available for reading.
+    /// Can be interpreted as an offset backwards from the read head of the sequencereader
+    /// e.g. when the sequencereader.consumed = 9 and _bitsavailable = 2, we can read 2 bits before
+    /// advancing the sequencereader and thus the logical read position is 9*8-2 bits
+    ///
+    /// this field can be negative after a seek operation - such would mean that the logical read head
+    /// is located after the physical read head, and thus a read will be performed and partially discarded
+    /// before returning new bits
+    /// </summary>
+    private int _bitsAvailable;
+
+    private byte                 _overflowBits;
+    private SequenceReader<byte> _stream;
+
+    public BitReader(ReadOnlyMemory<byte> memory) : this(new ReadOnlySequence<byte>(memory)) { }
+    public BitReader(ReadOnlySequence<byte> sequence) : this(new SequenceReader<byte>(sequence)) { }
+
+    public BitReader(SequenceReader<byte> stream) {
         _stream = stream;
     }
 
     /// <summary>
-    /// simple wrapper to read one byte from the stream asynchronously, equivalent to Stream.ReadByte
-    /// but asynchronous returns a short to support returning -1 in the end-of-stream case
+    /// The position of this reader from the start of its source sequence, in bits
     /// </summary>
-    private async ValueTask<short> ReadNextByteAsync() =>
-        await _stream.ReadAsync(_singleByteReadBuffer) < 1 ? (short)-1 : _singleByteReadBuffer[0];
+    public long Position => 8 * _stream.Consumed - _bitsAvailable;
 
     /// <summary>
-    /// Reads a single bit from the stream and returns it, interpreted as a bool
+    /// simple wrapper to read one byte from the sequence, returning -1 on a failure via a short to mimic
+    /// the semantics of <see cref="Stream.ReadByte"/>
     /// </summary>
-    public async ValueTask<bool> ReadBitAsync() => await ReadBitsAsync(1) > 0;
-
-    /// <summary>
-    /// Reads the specified number of bits from the stream and advances the read position.
-    /// </summary>
-    /// <param name="count">The number of bits to read.</param>
-    /// <returns>The value read. If not enough bits could be read, this will be a truncated value.</returns>
-    public async ValueTask<ulong> ReadBitsAsync(int count) {
-        switch (count) {
-            case < 0 or > 64:
-                throw new ArgumentOutOfRangeException(nameof(count), count, "");
-            case 0:
-                return 0UL;
-        }
-
-        (count, ulong bits) = await PeekBitsAsync(count);
-        // since we already peeked the bits and count <= 64, count <= _bitsAvailable and
-        // advance must complete synchronously. ValueTask facilitates avoiding unnecessary
-        // allocation here so extracting the synchronous part of AdvanceAsync is unnecessary
-        await AdvanceAsync(count);
-        return bits;
-    }
+    private short ReadNextByte() =>
+        _stream.TryRead(out byte b) ? b : (short)-1;
 
     /// <summary>
     /// Peek up to the specified number of bits ahead
     /// </summary>
     /// <param name="count">The number of bits to peek</param>
-    /// <returns>The number and value of bits successfully peeked</returns>
+    /// <param name="bits">The value of bits successfully peeked</param>
     /// <exception cref="ArgumentOutOfRangeException">When <paramref name="count"/> is less than 0 or more than 64</exception>
-    public async ValueTask<(int Count, ulong Bits)> PeekBitsAsync(int count) {
+    public void PeekBits(scoped ref int count, out ulong bits) {
+        // my IDE reallllly does not like the scoped keyword
         switch (count) {
             case < 0 or > 64:
                 throw new ArgumentOutOfRangeException(nameof(count), count, "");
             case 0:
-                return (0, 0UL);
+                bits = 0ul;
+                count = 0;
+                return;
         }
 
         // Read more bits in, 8 at a time, until either end of stream or we have enough. 
         while (_bitsAvailable < count) {
             short b;
-            if ((b = await ReadNextByteAsync()) < 0) {
-                return (_bitsAvailable, _bitBucket);
+            if ((b = ReadNextByte()) < 0) {
+                count = _bitsAvailable;
+                bits = _bitBucket;
+                return;
             }
 
-            if (_bitsAvailable > 0) // shift the new bits into the current bucket
-                _bitBucket |= (ulong)(b & 0xFF) << _bitsAvailable;
-            else // we have a pending skip from Seek, shift out the skipped bits
-                _bitBucket |= (ulong)(b & 0xFF) >> -_bitsAvailable;
+            // or the new bits into the bit bucket, shifted left so as to not overwrite available bits.
+            // if bitsavailable is negative, then shifting will be right to discard unread bits before
+            // the logical read head
+            _bitBucket |= MathExtensions.OmniLeftShift((ulong)(b & 0xFF), _bitsAvailable);
             // note the newly read bits
             _bitsAvailable += 8;
 
@@ -94,7 +94,7 @@ public sealed class BitReader
             value &= (1UL << count) - 1;
         }
 
-        return (count, value);
+        bits = value;
     }
 
     /// <summary>
@@ -103,7 +103,7 @@ public sealed class BitReader
     /// </summary>
     /// <param name="count">The number of bits to advance past</param>
     /// <returns><c>true</c> if the requested number of bits were drained, <c>false</c> otherwise</returns>
-    public async ValueTask<bool> AdvanceAsync(int count) {
+    public bool Advance(int count) {
         // cant go backwards and going nowhere is a nop
         if (count <= 0) return true;
 
@@ -122,10 +122,7 @@ public sealed class BitReader
                 // if a << -b is defined as a >> b
                 // When count <= 64, overflow values are left shifted to avoid modifying the remaining main bits
                 // otherwise, overflow values are right shifted to discard the remainder of count - 64
-                int shift = 64 - count;
-                _bitBucket |= shift > 0 
-                    ? (ulong)_overflowBits << shift 
-                    : (ulong)_overflowBits >> -shift;
+                _bitBucket |= MathExtensions.OmniLeftShift(_overflowBits, 64 - count);
 
                 if (_bitsAvailable - 64 > count) {
                     // if theres still overflow bits somehow after stuff gets shifted down then we shift stored overflow
@@ -149,7 +146,7 @@ public sealed class BitReader
 
         // count > _bitsAvailable, start reading to discard full bytes
         while (count > 8) {
-            if (await ReadNextByteAsync() == -1)
+            if (ReadNextByte() == -1)
                 return false;
 
             count -= 8;
@@ -157,7 +154,7 @@ public sealed class BitReader
 
         // Partial byte needed, retrieve and partial discard
         if (count > 0) {
-            short tmp = await ReadNextByteAsync();
+            short tmp = ReadNextByte();
             if (tmp == -1) return false;
             _bitBucket = (ulong)(tmp >> count);
             _bitsAvailable = 8 - count;
@@ -172,13 +169,12 @@ public sealed class BitReader
     /// a non-whole number of bytes
     /// </summary>
     public void Seek(long relBits, SeekOrigin origin) {
-        if (origin == SeekOrigin.Current)
-            if (relBits < 0) // backwards seek, take out available bits first
-                relBits += _bitsAvailable;
-            else // forwards seek, short-circuit skip the available bits
-                relBits -= _bitsAvailable;
-        
-        if(relBits == 0 && origin == SeekOrigin.Current)
+        if (origin == SeekOrigin.Current) {
+            relBits -= _bitsAvailable;
+            _bitsAvailable = 0;
+        }
+
+        if (relBits == 0 && origin == SeekOrigin.Current)
             return;
 
         // split given bits into bytes and bits. this can probably be made more efficient with bitwise ops
@@ -198,8 +194,33 @@ public sealed class BitReader
         // if we have to skip some bits forward, then setting _bitsAvailable to the negative of that number will force
         // PeekBitsAsync and AdvanceAsync will read extra bits from the stream when used and avoid performing a read
         _bitsAvailable = (int)-rem;
-        
+
+        if (bytes == 0) return;
+
         // Actually seek some number of bits
-        _stream.Seek(bytes, origin);
+        switch (origin) {
+            case SeekOrigin.Begin:
+                if (bytes < _stream.Consumed)
+                    _stream.Rewind(_stream.Consumed - bytes);
+                else {
+                    _stream.Advance(bytes - _stream.Consumed);
+                }
+
+                break;
+            case SeekOrigin.Current:
+                if (bytes < 0)
+                    _stream.Rewind(-bytes);
+                else {
+                    _stream.Advance(bytes);
+                }
+
+                break;
+            case SeekOrigin.End:
+                _stream.AdvanceToEnd();
+                _stream.Rewind(-bytes);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(origin), origin, null);
+        }
     }
 }

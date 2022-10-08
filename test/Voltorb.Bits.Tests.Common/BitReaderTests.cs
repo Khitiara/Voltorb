@@ -4,73 +4,91 @@ namespace Voltorb.Bits.Tests.Common;
 
 public class BitReaderTests
 {
-    private readonly MemoryStream _stream;
-    private readonly BitReader    _bitReader;
+    private readonly byte[] _stream;
 
     public BitReaderTests() {
-        _stream = new MemoryStream(new byte[] { 0b11111010, 0x23, 0x34, 0x51, 0x25, 0x8f, 0x40, 0x01, 0xf7, });
-        _bitReader = new BitReader(_stream);
+        _stream = new byte[] { 0b11111010, 0x23, 0x34, 0x51, 0x25, 0x8f, 0x40, 0x01, 0xf7, };
     }
 
     [Fact]
-    public async Task TestReadSimple() {
-        (await _bitReader.ReadBitsAsync(5)).Should().Be(0b11010);
+    public void TestReadSimple() {
+        BitReader bitReader = new(_stream);
+        bitReader.ReadBits(5).Should().Be(0b11010);
+        bitReader.Position.Should().Be(5);
     }
 
     [Fact]
-    public async Task TestPeek() {
-        MemoryStream stream = new(new byte[] { 0b11111010, 0x23, 0x34, });
-        BitReader bitReader = new(stream);
-        (int count, ulong bits) = await bitReader.PeekBitsAsync(5);
+    public void TestPeek() {
+        BitReader bitReader = new(_stream);
+        int count = 5;
+        bitReader.PeekBits(ref count, out ulong bits);
         count.Should().Be(5);
         bits.Should().Be(0b11010);
-        (count, ulong bits2) = await bitReader.PeekBitsAsync(8);
+        count = 8;
+        bitReader.PeekBits(ref count, out ulong bits2);
         count.Should().Be(8);
         bits2.Should().Be(0b11111010);
         (bits2 & 0b11111).Should().Be(bits);
     }
 
     [Fact]
-    public async Task TestPeekAdvance() {
-        (await _bitReader.AdvanceAsync(11)).Should().BeTrue();
-        (await _bitReader.ReadBitsAsync(3)).Should().Be((0x23 & 0b111000) >> 3);
+    public void TestPeekAdvance() {
+        BitReader bitReader = new(_stream);
+        bitReader.Advance(11).Should().BeTrue();
+        bitReader.ReadBits(3).Should().Be((0x23 & 0b111000) >> 3);
     }
 
     [Fact]
-    public async Task TestBitReaderThrowing() {
-        await _bitReader.Awaiting(b => b.PeekBitsAsync(65)).Should()
-            .ThrowAsync<ArgumentOutOfRangeException>()
+    public void TestBitReaderThrowing() {
+        new Action(() => PeekHelper(new BitReader(_stream),65)).Should()
+            .Throw<ArgumentOutOfRangeException>()
             .WithParameterName("count");
-        await _bitReader.Awaiting(b => b.ReadBitsAsync(65)).Should()
-            .ThrowAsync<ArgumentOutOfRangeException>()
+        new Action(() => {
+                BitReader b = new(_stream);
+                b.ReadBits(65);
+            }).Should()
+            .Throw<ArgumentOutOfRangeException>()
             .WithParameterName("count");
-        await _bitReader.Awaiting(b => b.PeekBitsAsync(-1)).Should()
-            .ThrowAsync<ArgumentOutOfRangeException>()
+        new Action(() => PeekHelper(new BitReader(_stream),-1)).Should()
+            .Throw<ArgumentOutOfRangeException>()
             .WithParameterName("count");
-        await _bitReader.Awaiting(b => b.ReadBitsAsync(-1)).Should()
-            .ThrowAsync<ArgumentOutOfRangeException>()
+        new Action(() => {
+                BitReader b = new(_stream);
+                b.ReadBits(-1);
+            }).Should()
+            .Throw<ArgumentOutOfRangeException>()
             .WithParameterName("count");
     }
 
-    [Fact]
-    public async Task TestBitReaderZero() {
-        (await _bitReader.PeekBitsAsync(0)).Should().Be((0, 0UL));
-        (await _bitReader.ReadBitsAsync(0)).Should().Be(0UL);
-        (await _bitReader.AdvanceAsync(-1)).Should().BeTrue();
+    private static (int, ulong) PeekHelper(BitReader reader, int count) {
+        reader.PeekBits(ref count, out var b);
+        return (count, b);
     }
 
     [Fact]
-    public async Task TestBitReaderBig() {
-        (await _bitReader.AdvanceAsync(5)).Should().BeTrue();
-        (await _bitReader.PeekBitsAsync(63)).Should().Be((63, 0x380A04792A89A11FUL));
-        (await _bitReader.AdvanceAsync(1)).Should().BeTrue();
-        (await _bitReader.AdvanceAsync(64)).Should().BeTrue();
-        
-        _bitReader.Seek(-69, SeekOrigin.Current);
-        _bitReader.Seek(5, SeekOrigin.Current);
-        _bitReader.Seek(-5, SeekOrigin.Current);
-        (await _bitReader.PeekBitsAsync(4)).Should().Be((4, 0xFUL));
-        _bitReader.Seek(-7, SeekOrigin.Current);
-        (await _bitReader.ReadBitAsync()).Should().BeTrue();
+    public void TestBitReaderZero() {
+        BitReader bitReader = new(_stream);
+        PeekHelper(bitReader, 0).Should().Be((0, 0UL));
+        bitReader.ReadBits(0).Should().Be(0UL);
+        bitReader.Advance(-1).Should().BeTrue();
+    }
+
+    [Fact]
+    public void TestBitReaderBig() {
+        BitReader bitReader = new(_stream);
+        bitReader.Advance(5).Should().BeTrue();
+        PeekHelper(bitReader,63).Should().Be((63, 0x380A04792A89A11FUL));
+        bitReader.Position.Should().Be(5);
+        bitReader.Advance(1).Should().BeTrue();
+        bitReader.Advance(64).Should().BeTrue();
+        bitReader.Position.Should().Be(70);
+
+        bitReader.Seek(-69, SeekOrigin.Current);
+        bitReader.Position.Should().Be(1);
+        bitReader.Seek(5, SeekOrigin.Current);
+        bitReader.Seek(-5, SeekOrigin.Current);
+        PeekHelper(bitReader,4).Should().Be((4, 0xFUL));
+        bitReader.Seek(1, SeekOrigin.Current);
+        bitReader.ReadBit().Should().BeTrue();
     }
 }
