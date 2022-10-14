@@ -57,15 +57,14 @@ public ref struct BitReader
     /// <param name="count">The number of bits to peek</param>
     /// <param name="bits">The value of bits successfully peeked</param>
     /// <exception cref="ArgumentOutOfRangeException">When <paramref name="count"/> is less than 0 or more than 64</exception>
-    public void PeekBits(scoped ref int count, scoped out ulong bits) {
+    public int PeekBits(int count, scoped out ulong bits) {
         // my IDE reallllly does not like the scoped keyword
         switch (count) {
             case < 0 or > 64:
                 throw new ArgumentOutOfRangeException(nameof(count), count, "");
             case 0:
                 bits = 0ul;
-                count = 0;
-                return;
+                return 0;
         }
 
         // if we are at a negative _bitsAvailable, shorten the below loop using advance until we need to skip less than
@@ -76,9 +75,8 @@ public ref struct BitReader
             bytes = -bytes;
 
             if (_stream.Remaining < bytes + 1) {
-                count = 0;
                 bits = 0UL;
-                return;
+                return 0;
             }
 
             _stream.Advance(bytes);
@@ -87,15 +85,14 @@ public ref struct BitReader
         // Read more bits in, 8 at a time, until either end of stream or we have enough. 
         while (_bitsAvailable < count) {
             if (!_stream.TryRead(out byte b)) {
-                count = _bitsAvailable;
                 bits = _bitBucket;
-                return;
+                return _bitsAvailable;
             }
 
             // or the new bits into the bit bucket, shifted left so as to not overwrite available bits.
             // if bitsavailable is negative, then shifting will be right to discard unread bits before
             // the logical read head
-            _bitBucket |= MathExtensions.OmniLeftShift((ulong)(b & 0xFF), _bitsAvailable);
+            _bitBucket |= MathExtensions.ReversibleLeftShift((ulong)(b & 0xFF), _bitsAvailable);
             // note the newly read bits
             _bitsAvailable += 8;
 
@@ -115,6 +112,7 @@ public ref struct BitReader
         }
 
         bits = value;
+        return count;
     }
 
     /// <summary>
@@ -141,7 +139,7 @@ public ref struct BitReader
                 // if a << -b is defined as a >> b
                 // When count <= 64, overflow values are left shifted to avoid modifying the remaining main bits
                 // otherwise, overflow values are right shifted to discard the remainder of count - 64
-                _bitBucket |= MathExtensions.OmniLeftShift(_overflowBits, 64 - count);
+                _bitBucket |= MathExtensions.ReversibleLeftShift(_overflowBits, 64 - count);
 
                 if (_bitsAvailable - 64 > count) {
                     // if theres still overflow bits somehow after stuff gets shifted down then we shift stored overflow

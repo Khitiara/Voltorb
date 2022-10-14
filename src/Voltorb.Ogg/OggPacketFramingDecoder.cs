@@ -8,12 +8,12 @@ namespace Voltorb.Ogg;
 /// lacks semantic packet boundaries, this type may be inefficient due to allocations of individual byte sequences for
 /// packets requiring extra buffers and copies.
 /// </summary>
-public sealed class OggPacketDeframer
+public sealed class OggPacketFramingDecoder
 {
     private readonly MemoryPool<byte> _memoryPool;
     private          Sequence<byte>   _currentPacketBuffer;
 
-    public OggPacketDeframer(MemoryPool<byte> memoryPool) {
+    public OggPacketFramingDecoder(MemoryPool<byte> memoryPool) {
         _memoryPool = memoryPool;
         _currentPacketBuffer = new Sequence<byte>(_memoryPool);
     }
@@ -30,7 +30,7 @@ public sealed class OggPacketDeframer
     /// </summary>
     /// <remarks>
     /// Demultiplexing of ogg logical bitstreams and validation of page sequence numbers are not performed. It is
-    /// expected that separate instances of <see cref="OggPacketDeframer"/> will be maintained for each logical
+    /// expected that separate instances of <see cref="OggPacketFramingDecoder"/> will be maintained for each logical
     /// bitstream, and loss of pages will be detected. As pages not marked as a continuation result in discarding
     /// previous partial packet data when submitted, a corrupt packet will only occur when two out of sequence pages
     /// are submitted, of which the first has an incomplete final packet and the second is a packet continuation,

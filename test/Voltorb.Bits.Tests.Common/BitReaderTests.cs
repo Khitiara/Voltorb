@@ -17,11 +17,11 @@ public class BitReaderTests
     public void TestPeek() {
         BitReader bitReader = new(_stream);
         int count = 5;
-        bitReader.PeekBits(ref count, out ulong bits);
+        count = bitReader.PeekBits(count, out ulong bits);
         count.Should().Be(5);
         bits.Should().Be(0b11010);
         count = 8;
-        bitReader.PeekBits(ref count, out ulong bits2);
+        count = bitReader.PeekBits(count, out ulong bits2);
         count.Should().Be(8);
         bits2.Should().Be(0b11111010);
         (bits2 & 0b11111).Should().Be(bits);
@@ -57,7 +57,7 @@ public class BitReaderTests
     }
 
     private static (int, ulong) PeekHelper(BitReader reader, int count) {
-        reader.PeekBits(ref count, out var b);
+        count = reader.PeekBits(count, out var b);
         return (count, b);
     }
 
