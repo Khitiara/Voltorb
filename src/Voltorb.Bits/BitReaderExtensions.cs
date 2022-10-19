@@ -1,4 +1,8 @@
-﻿namespace Voltorb.Bits;
+﻿using System.Buffers.Binary;
+using System.Numerics;
+using System.Runtime.InteropServices;
+
+namespace Voltorb.Bits;
 
 public static class BitReaderExtensions
 {
@@ -9,8 +13,17 @@ public static class BitReaderExtensions
     /// <param name="count">The number of bits to read.</param>
     /// <returns>The value read. If not enough bits could be read, this will be a truncated value.</returns>
     public static ulong ReadBits(this ref BitReader b, int count) {
-        b.ReadBits(count, out ulong bits);
+        if (b.ReadBits(count, out ulong bits) < count)
+            throw new IOException();
         return bits;
+    }
+
+    public static T ReadNumeric<T>(this ref BitReader b) where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T> {
+        int octets = Marshal.SizeOf<T>();
+        ulong bits = b.ReadBits(octets * 8);
+        Span<byte> s = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(s, bits);
+        return T.ReadLittleEndian(s[..octets], true);
     }
 
     /// <summary>
@@ -30,9 +43,6 @@ public static class BitReaderExtensions
         }
 
         int bitsRead = b.PeekBits(count, out bits);;
-        // since we already peeked the bits and count <= 64, count <= _bitsAvailable and
-        // advance must complete synchronously. ValueTask facilitates avoiding unnecessary
-        // allocation here so extracting the synchronous part of AdvanceAsync is unnecessary
         b.TryAdvance(bitsRead);
         return bitsRead;
     }

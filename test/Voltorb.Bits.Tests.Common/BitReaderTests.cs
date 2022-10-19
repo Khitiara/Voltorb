@@ -57,7 +57,7 @@ public class BitReaderTests
     }
 
     private static (int count, ulong bits) PeekHelper(BitReader reader, int count) {
-        count = reader.PeekBits(count, out var b);
+        count = reader.PeekBits(count, out ulong b);
         return (count, b);
     }
 

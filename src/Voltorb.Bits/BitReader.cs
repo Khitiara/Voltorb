@@ -57,8 +57,7 @@ public ref struct BitReader
     /// <param name="count">The number of bits to peek</param>
     /// <param name="bits">The value of bits successfully peeked</param>
     /// <exception cref="ArgumentOutOfRangeException">When <paramref name="count"/> is less than 0 or more than 64</exception>
-    public int PeekBits(int count, scoped out ulong bits) {
-        // my IDE reallllly does not like the scoped keyword
+    public int PeekBits(int count, out ulong bits) {
         switch (count) {
             case < 0 or > 64:
                 throw new ArgumentOutOfRangeException(nameof(count), count, "");
