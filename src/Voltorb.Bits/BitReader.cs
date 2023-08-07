@@ -36,20 +36,24 @@ public ref struct BitReader
     /// </summary>
     private int _bitsAvailable;
 
-    private byte                 _overflowBits;
-    private SequenceReader<byte> _stream;
+    private          byte                   _overflowBits;
+    private          SequenceReader<byte>   _stream;
+    private readonly ReadOnlySequence<byte> _sequence;
 
     public BitReader(ReadOnlyMemory<byte> memory) : this(new ReadOnlySequence<byte>(memory)) { }
     public BitReader(ReadOnlySequence<byte> sequence) : this(new SequenceReader<byte>(sequence)) { }
 
     public BitReader(SequenceReader<byte> stream) {
         _stream = stream;
+        _sequence = _stream.UnreadSequence;
     }
 
     /// <summary>
     /// The position of this reader from the start of its source sequence, in bits
     /// </summary>
     public long Position => 8 * _stream.Consumed - _bitsAvailable;
+
+    public long Remaining => 8 * _stream.Length - Position;
 
     /// <summary>
     /// Peek up to the specified number of bits ahead
@@ -206,18 +210,14 @@ public ref struct BitReader
 
         // finished adjusting the partial byte information. that being done, all thats left is to move the whole-byte
         // read index 
-        if (bytes == 0) return;
+        if ((bytes == 0 && origin == SeekOrigin.Current) || (bytes == _stream.Consumed && origin == SeekOrigin.Begin))
+            return;
 
         // Actually seek some number of bits
         switch (origin) {
             case SeekOrigin.Begin:
-                // sequencereader has no reset so we calculate an offset and seek from the current position
-                if (bytes < _stream.Consumed) {
-                    _stream.Rewind(_stream.Consumed - bytes);
-                } else {
-                    _stream.Advance(bytes - _stream.Consumed);
-                }
-
+                _stream = new SequenceReader<byte>(_sequence);
+                _stream.Advance(bytes);
                 break;
             case SeekOrigin.Current:
                 if (bytes < 0) {
@@ -225,7 +225,6 @@ public ref struct BitReader
                 } else {
                     _stream.Advance(bytes);
                 }
-
                 break;
             case SeekOrigin.End:
                 // use the sequencereader to advance to the end and work backwards.
@@ -236,5 +235,13 @@ public ref struct BitReader
             default:
                 throw new ArgumentOutOfRangeException(nameof(origin), origin, null);
         }
+    }
+
+    /// <summary>
+    /// Reset this <see cref="BitReader"/> to the beginning of the source sequence
+    /// </summary>
+    public void Reset() {
+        _stream = new SequenceReader<byte>(_sequence);
+        _bitsAvailable = 0;
     }
 }

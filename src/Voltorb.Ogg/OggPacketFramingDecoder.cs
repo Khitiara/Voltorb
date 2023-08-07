@@ -8,15 +8,39 @@ namespace Voltorb.Ogg;
 /// lacks semantic packet boundaries, this type may be inefficient due to allocations of individual byte sequences for
 /// packets requiring extra buffers and copies.
 /// </summary>
-public sealed class OggPacketFramingDecoder
+public sealed class OggPacketFramingDecoder : IDisposable
 {
-    private readonly MemoryPool<byte> _memoryPool;
-    private          Sequence<byte>   _currentPacketBuffer;
+    private readonly MemoryPool<byte>             _memoryPool;
+    private          Sequence<byte>               _currentPacketBuffer;
+    private readonly SortedDictionary<ulong, int> _pageGranules;
 
     public OggPacketFramingDecoder(MemoryPool<byte> memoryPool) {
         _memoryPool = memoryPool;
         _currentPacketBuffer = new Sequence<byte>(_memoryPool);
+        _pageGranules = new SortedDictionary<ulong, int>();
     }
+
+    /// <summary>
+    /// Retrieves a best guess at the last page with granule position no greater than <paramref name="granulePosition"/>
+    /// </summary>
+    /// <param name="granulePosition">The granule position to search for</param>
+    /// <returns>A page index with granule position at most <paramref name="granulePosition"/></returns>
+    public int GetPageIndex(ulong granulePosition) {
+        int lastPage = 0;
+        foreach ((ulong key, int value) in _pageGranules) {
+            if (key > granulePosition)
+                break;
+            lastPage = value;
+        }
+
+        return lastPage;
+    }
+
+    public void ResetBuffer() {
+        _currentPacketBuffer.Reset();
+    }
+
+    public void Reset() => Dispose();
 
     /// <summary>
     /// Submits an ogg page to be split into packets, with individual packet byte sequences yielded into the returned
@@ -39,6 +63,7 @@ public sealed class OggPacketFramingDecoder
     public IEnumerable<Sequence<byte>> SubmitPage(OggPageReader.PageData page) {
         // we consume and discard the full packet bitstream
         using (page) {
+            _pageGranules[page.GranulePosition] = int.Min(_pageGranules[page.GranulePosition], page.PageIndex);
             // on the first iteration we wont reset if the page has the continuation flag
             bool shouldReset = !page.PacketType.HasFlagFast(HeaderType.ContinuesPacket);
             foreach (int length in page.PacketLengths) {
@@ -71,5 +96,10 @@ public sealed class OggPacketFramingDecoder
                 _currentPacketBuffer = new Sequence<byte>(_memoryPool);
             }
         }
+    }
+
+    public void Dispose() {
+        _currentPacketBuffer.Dispose();
+        _pageGranules.Clear();
     }
 }

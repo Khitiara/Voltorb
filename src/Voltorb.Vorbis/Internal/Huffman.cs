@@ -5,7 +5,7 @@ internal sealed class Huffman :  IComparer<HuffmanListNode>
     private const int MaxTableBits = 10;
 
     public int TableBits { get; private set; }
-    public List<HuffmanListNode?> PrefixTree { get; private set; }
+    public List<HuffmanListNode?> PrefixTree { get; private set; } = null!;
     public IReadOnlyList<HuffmanListNode>? OverflowList { get; private set; }
 
     public void GenerateTable(IReadOnlyList<int> values, int[] lengthList, int[] codeList)
@@ -71,8 +71,7 @@ internal sealed class Huffman :  IComparer<HuffmanListNode>
         OverflowList = overflowList;
     }
 
-    int IComparer<HuffmanListNode>.Compare(HuffmanListNode? x, HuffmanListNode? y) {
-        if (x is null || y is null) return x == y ? 0 : x is null ? -1 : 1;
+    int IComparer<HuffmanListNode>.Compare(HuffmanListNode x, HuffmanListNode y) {
         int len = x.Length - y.Length;
         if (len == 0)
         {

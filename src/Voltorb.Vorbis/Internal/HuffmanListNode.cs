@@ -1,6 +1,6 @@
 ﻿namespace Voltorb.Vorbis.Internal;
 
-internal class HuffmanListNode
+internal struct HuffmanListNode
 {
     internal int Value;
 

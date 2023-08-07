@@ -229,7 +229,7 @@ public class OggPageReader : IDisposable
         // read into the struct (this makes a copy on the stack)
         PageHeader header = MemoryMarshal.Read<PageHeader>(memory.Span);
         // clear the crc in the buffer now we have a copy in header
-        memory.Span[18..21].Fill(0);
+        memory.Span[18..21].Clear();
         // and commit the main header bytes
         sequenceForCrc.Advance(23);
 

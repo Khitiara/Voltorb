@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using CommunityToolkit.HighPerformance;
 using Voltorb.Bits;
 
 namespace Voltorb.Vorbis.Internal;
@@ -33,11 +34,11 @@ internal sealed class Codebook
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
-    private readonly float[]                        _lookupTable;
     private readonly IReadOnlyList<HuffmanListNode> _overflowList;
     private readonly List<HuffmanListNode?>         _prefixList;
     private readonly int                            _prefixBitLength;
     private readonly int                            _maxBits;
+    private readonly float[,]                       _lookupTable2;
 
     public Codebook(ref BitReader packet, Huffman huffman) {
         // first, check the sync pattern
@@ -130,15 +131,15 @@ internal sealed class Codebook
 
         MapType = (int)packet.ReadBits(4);
         if (MapType == 0) {
-            _lookupTable = Array.Empty<float>();
+            _lookupTable2 = new float[0, 0];
         } else {
-            float minValue1 = MathExtensions.ConvertFromVorbisFloat32((uint)packet.ReadBits(32));
-            float deltaValue1 = MathExtensions.ConvertFromVorbisFloat32((uint)packet.ReadBits(32));
+            float minValue1 = MathExtensions.ConvertFromVorbisFloat32(packet.ReadNumeric<uint>());
+            float deltaValue1 = MathExtensions.ConvertFromVorbisFloat32(packet.ReadNumeric<uint>());
             int valueBits1 = (int)packet.ReadBits(4) + 1;
             bool sequenceP1 = packet.ReadBit();
 
             int lookupValueCount1 = Entries * Dimensions;
-            float[] lookupTable1 = new float[lookupValueCount1];
+            float[,] table2 = new float[Entries, Dimensions];
             if (MapType == 1) {
                 lookupValueCount1 = Lookup1Values();
             }
@@ -156,7 +157,7 @@ internal sealed class Codebook
                     for (int i4 = 0; i4 < Dimensions; i4++) {
                         int moff1 = idx1 / idxDiv1 % lookupValueCount1;
                         double value1 = multiplicands1[moff1] * deltaValue1 + minValue1 + last1;
-                        lookupTable1[idx1 * Dimensions + i4] = (float)value1;
+                        table2[idx1, i4] = (float)value1;
 
                         if (sequenceP1) last1 = value1;
 
@@ -169,7 +170,7 @@ internal sealed class Codebook
                     int moff2 = idx2 * Dimensions;
                     for (int i5 = 0; i5 < Dimensions; i5++) {
                         double value2 = multiplicands1[moff2] * deltaValue1 + minValue1 + last2;
-                        lookupTable1[idx2 * Dimensions + i5] = (float)value2;
+                        table2[idx2, i5] = (float)value2;
 
                         if (sequenceP1) last2 = value2;
 
@@ -178,7 +179,7 @@ internal sealed class Codebook
                 }
             }
 
-            _lookupTable = lookupTable1;
+            _lookupTable2 = table2;
         }
 
         int Lookup1Values() {
@@ -241,8 +242,7 @@ internal sealed class Codebook
         if (bitsRead == 0) return -1;
 
         // try to get the value from the prefix list...
-        HuffmanListNode? node = _prefixList[data];
-        if (node != null) {
+        if (_prefixList[data] is {} node) {
             packet.TryAdvance(node.Length);
             return node.Value;
         }
@@ -260,7 +260,7 @@ internal sealed class Codebook
         return -1;
     }
 
-    public float this[int entry, int dim] => _lookupTable[entry * Dimensions + dim];
+    public ReadOnlySpan2D<float> Lookup => _lookupTable2;
 
     public int Dimensions { get; }
 

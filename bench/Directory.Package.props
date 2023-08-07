@@ -1,0 +1,9 @@
+﻿<Project>
+    <Import Project="$([MSBuild]::GetPathOfFileAbove(Directory.Package.props, $(MSBuildThisFileDirectory)..))" />
+    <PropertyGroup>
+        <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    </PropertyGroup>
+    <ItemGroup>
+        <!--    add your PackageVersion nodes here -->
+    </ItemGroup>
+</Project>

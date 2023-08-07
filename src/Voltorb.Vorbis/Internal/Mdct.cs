@@ -2,20 +2,21 @@
 
 namespace Voltorb.Vorbis.Internal;
 
-internal sealed class Mdct 
+internal static class Mdct 
 {
-    private readonly Dictionary<int, MdctImpl> _setupCache = new();
+    private static readonly Dictionary<int, MdctImpl> SetupCache = new();
 
-    public void Reverse(float[] samples, int sampleCount)
+    public static void Reverse(Span<float> samples, int sampleCount)
     {
-        if (!_setupCache.TryGetValue(sampleCount, out MdctImpl? impl))
+        if (!SetupCache.TryGetValue(sampleCount, out MdctImpl? impl))
         {
             impl = new MdctImpl(sampleCount);
-            _setupCache[sampleCount] = impl;
+            SetupCache[sampleCount] = impl;
         }
         impl.CalcReverse(samples);
     }
 
+    // TODO: I'm not smart enough to vectorize this
     private sealed class MdctImpl
     {
         private readonly int _n, _n2, _n4, _n8, _ld;
@@ -39,15 +40,15 @@ internal sealed class Mdct
             int k, k2;
             for (k = k2 = 0; k < _n4; ++k, k2 += 2)
             {
-                _a[k2] = (float)Math.Cos(4 * k * MathF.PI / n);
-                _a[k2 + 1] = (float)-Math.Sin(4 * k * MathF.PI / n);
-                _b[k2] = (float)Math.Cos((k2 + 1) * MathF.PI / n / 2) * .5f;
-                _b[k2 + 1] = (float)Math.Sin((k2 + 1) * MathF.PI / n / 2) * .5f;
+                _a[k2] = MathF.Cos(4 * k * MathF.PI / n);
+                _a[k2 + 1] = -MathF.Sin(4 * k * MathF.PI / n);
+                _b[k2] = MathF.Cos((k2 + 1) * MathF.PI / n / 2) * .5f;
+                _b[k2 + 1] = MathF.Sin((k2 + 1) * MathF.PI / n / 2) * .5f;
             }
             for (k = k2 = 0; k < _n8; ++k, k2 += 2)
             {
-                _c[k2] = (float)Math.Cos(2 * (k2 + 1) * MathF.PI / n);
-                _c[k2 + 1] = (float)-Math.Sin(2 * (k2 + 1) * MathF.PI / n);
+                _c[k2] = MathF.Cos(2 * (k2 + 1) * MathF.PI / n);
+                _c[k2 + 1] = -MathF.Sin(2 * (k2 + 1) * MathF.PI / n);
             }
 
             // now, calc the bit reverse table
@@ -58,9 +59,9 @@ internal sealed class Mdct
             }
         }
 
-        internal void CalcReverse(float[] buffer)
+        internal void CalcReverse(Span<float> buffer)
         {
-            float[] buf2 = new float[_n2];
+            Span<float> buf2 = stackalloc float[_n2];
 
             // copy and reflect spectral data
             // step 0
@@ -69,8 +70,7 @@ internal sealed class Mdct
                 int d = _n2 - 2; // buf2
                 int aa = 0;     // A
                 int e = 0;      // buffer
-                int eStop = _n2;// buffer
-                while (e != eStop)
+                while (e != _n2)
                 {
                     buf2[d + 1] = (buffer[e] * _a[aa] - buffer[e + 2] * _a[aa + 1]);
                     buf2[d] = (buffer[e] * _a[aa + 1] + buffer[e + 2] * _a[aa]);
@@ -90,10 +90,6 @@ internal sealed class Mdct
                 }
             }
 
-            // apply "symbolic" names
-            float[] u = buffer;
-            float[] v = buf2;
-
             // step 2
             {
                 int aa = _n2 - 8;    // A
@@ -106,19 +102,19 @@ internal sealed class Mdct
 
                 while (aa >= 0)
                 {
-                    float v4121 = v[e0 + 1] - v[e1 + 1];
-                    float v4020 = v[e0] - v[e1];
-                    u[d0 + 1] = v[e0 + 1] + v[e1 + 1];
-                    u[d0] = v[e0] + v[e1];
-                    u[d1 + 1] = v4121 * _a[aa + 4] - v4020 * _a[aa + 5];
-                    u[d1] = v4020 * _a[aa + 4] + v4121 * _a[aa + 5];
+                    float v4121 = buf2[e0 + 1] - buf2[e1 + 1];
+                    float v4020 = buf2[e0] - buf2[e1];
+                    buffer[d0 + 1] = buf2[e0 + 1] + buf2[e1 + 1];
+                    buffer[d0] = buf2[e0] + buf2[e1];
+                    buffer[d1 + 1] = v4121 * _a[aa + 4] - v4020 * _a[aa + 5];
+                    buffer[d1] = v4020 * _a[aa + 4] + v4121 * _a[aa + 5];
 
-                    v4121 = v[e0 + 3] - v[e1 + 3];
-                    v4020 = v[e0 + 2] - v[e1 + 2];
-                    u[d0 + 3] = v[e0 + 3] + v[e1 + 3];
-                    u[d0 + 2] = v[e0 + 2] + v[e1 + 2];
-                    u[d1 + 3] = v4121 * _a[aa] - v4020 * _a[aa + 1];
-                    u[d1 + 2] = v4020 * _a[aa] + v4121 * _a[aa + 1];
+                    v4121 = buf2[e0 + 3] - buf2[e1 + 3];
+                    v4020 = buf2[e0 + 2] - buf2[e1 + 2];
+                    buffer[d0 + 3] = buf2[e0 + 3] + buf2[e1 + 3];
+                    buffer[d0 + 2] = buf2[e0 + 2] + buf2[e1 + 2];
+                    buffer[d1 + 3] = v4121 * _a[aa] - v4020 * _a[aa + 1];
+                    buffer[d1 + 2] = v4020 * _a[aa] + v4121 * _a[aa + 1];
 
                     aa -= 8;
 
@@ -132,14 +128,14 @@ internal sealed class Mdct
             // step 3
 
             // iteration 0
-            step3_iter0_loop(_n >> 4, u, _n2 - 1 - _n4 * 0, -_n8);
-            step3_iter0_loop(_n >> 4, u, _n2 - 1 - _n4 * 1, -_n8);
+            step3_iter0_loop(_n >> 4, buffer, _n2 - 1 - _n4 * 0, -_n8);
+            step3_iter0_loop(_n >> 4, buffer, _n2 - 1 - _n4 * 1, -_n8);
 
             // iteration 1
-            step3_inner_r_loop(_n >> 5, u, _n2 - 1 - _n8 * 0, -(_n >> 4), 16);
-            step3_inner_r_loop(_n >> 5, u, _n2 - 1 - _n8 * 1, -(_n >> 4), 16);
-            step3_inner_r_loop(_n >> 5, u, _n2 - 1 - _n8 * 2, -(_n >> 4), 16);
-            step3_inner_r_loop(_n >> 5, u, _n2 - 1 - _n8 * 3, -(_n >> 4), 16);
+            step3_inner_r_loop(_n >> 5, buffer, _n2 - 1 - _n8 * 0, -(_n >> 4), 16);
+            step3_inner_r_loop(_n >> 5, buffer, _n2 - 1 - _n8 * 1, -(_n >> 4), 16);
+            step3_inner_r_loop(_n >> 5, buffer, _n2 - 1 - _n8 * 2, -(_n >> 4), 16);
+            step3_inner_r_loop(_n >> 5, buffer, _n2 - 1 - _n8 * 3, -(_n >> 4), 16);
 
             // iterations 2 ... x
             int l = 2;
@@ -150,7 +146,7 @@ internal sealed class Mdct
                 int lim = 1 << (l + 1);
                 for (int i = 0; i < lim; ++i)
                 {
-                    step3_inner_r_loop(_n >> (l + 4), u, _n2 - 1 - k0 * i, -k02, 1 << (l + 3));
+                    step3_inner_r_loop(_n >> (l + 4), buffer, _n2 - 1 - k0 * i, -k02, 1 << (l + 3));
                 }
             }
 
@@ -167,14 +163,14 @@ internal sealed class Mdct
 
                 for (int r = rLim; r > 0; --r)
                 {
-                    step3_inner_s_loop(lim, u, iOff, -k02, a0, k1, k0);
+                    step3_inner_s_loop(lim, buffer, iOff, -k02, a0, k1, k0);
                     a0 += k1 * 4;
                     iOff -= 8;
                 }
             }
 
             // combine some iteration steps...
-            step3_inner_s_loop_ld654(_n >> 5, u, _n2 - 1, _n);
+            step3_inner_s_loop_ld654(_n >> 5, buffer, _n2 - 1, _n);
 
             // steps 4, 5, and 6
             {
@@ -185,16 +181,16 @@ internal sealed class Mdct
                 while (d0 >= 0)
                 {
                     int k4 = _bitrev[bit];
-                    v[d1 + 3] = u[k4];
-                    v[d1 + 2] = u[k4 + 1];
-                    v[d0 + 3] = u[k4 + 2];
-                    v[d0 + 2] = u[k4 + 3];
+                    buf2[d1 + 3] = buffer[k4];
+                    buf2[d1 + 2] = buffer[k4 + 1];
+                    buf2[d0 + 3] = buffer[k4 + 2];
+                    buf2[d0 + 2] = buffer[k4 + 3];
 
                     k4 = _bitrev[bit + 1];
-                    v[d1 + 1] = u[k4];
-                    v[d1] = u[k4 + 1];
-                    v[d0 + 1] = u[k4 + 2];
-                    v[d0] = u[k4 + 3];
+                    buf2[d1 + 1] = buffer[k4];
+                    buf2[d1] = buffer[k4 + 1];
+                    buf2[d0 + 1] = buffer[k4 + 2];
+                    buf2[d0] = buffer[k4 + 3];
 
                     d0 -= 4;
                     d1 -= 4;
@@ -210,33 +206,33 @@ internal sealed class Mdct
 
                 while (d < e)
                 {
-                    float a02 = v[d] - v[e + 2];
-                    float a11 = v[d + 1] + v[e + 3];
+                    float a02 = buf2[d] - buf2[e + 2];
+                    float a11 = buf2[d + 1] + buf2[e + 3];
 
                     float b0 = _c[c + 1] * a02 + _c[c] * a11;
                     float b1 = _c[c + 1] * a11 - _c[c] * a02;
 
-                    float b2 = v[d] + v[e + 2];
-                    float b3 = v[d + 1] - v[e + 3];
+                    float b2 = buf2[d] + buf2[e + 2];
+                    float b3 = buf2[d + 1] - buf2[e + 3];
 
-                    v[d] = b2 + b0;
-                    v[d + 1] = b3 + b1;
-                    v[e + 2] = b2 - b0;
-                    v[e + 3] = b1 - b3;
+                    buf2[d] = b2 + b0;
+                    buf2[d + 1] = b3 + b1;
+                    buf2[e + 2] = b2 - b0;
+                    buf2[e + 3] = b1 - b3;
 
-                    a02 = v[d + 2] - v[e];
-                    a11 = v[d + 3] + v[e + 1];
+                    a02 = buf2[d + 2] - buf2[e];
+                    a11 = buf2[d + 3] + buf2[e + 1];
 
                     b0 = _c[c + 3] * a02 + _c[c + 2] * a11;
                     b1 = _c[c + 3] * a11 - _c[c + 2] * a02;
 
-                    b2 = v[d + 2] + v[e];
-                    b3 = v[d + 3] - v[e + 1];
+                    b2 = buf2[d + 2] + buf2[e];
+                    b3 = buf2[d + 3] - buf2[e + 1];
 
-                    v[d + 2] = b2 + b0;
-                    v[d + 3] = b3 + b1;
-                    v[e] = b2 - b0;
-                    v[e + 1] = b1 - b3;
+                    buf2[d + 2] = b2 + b0;
+                    buf2[d + 3] = b3 + b1;
+                    buf2[e] = b2 - b0;
+                    buf2[e + 1] = b1 - b3;
 
                     c += 4;
                     d += 4;
@@ -297,7 +293,7 @@ internal sealed class Mdct
             }
         }
 
-        private void step3_iter0_loop(int n, float[] e, int iOff, int kOff)
+        private void step3_iter0_loop(int n, Span<float> e, int iOff, int kOff)
         {
             int ee0 = iOff;        // e
             int ee2 = ee0 + kOff;  // e
@@ -341,7 +337,7 @@ internal sealed class Mdct
             }
         }
 
-        private void step3_inner_r_loop(int lim, float[] e, int d0, int kOff, int k1)
+        private void step3_inner_r_loop(int lim, Span<float> e, int d0, int kOff, int k1)
         {
             int e0 = d0;            // e
             int e2 = e0 + kOff;    // e
@@ -390,7 +386,7 @@ internal sealed class Mdct
             }
         }
 
-        private void step3_inner_s_loop(int n, float[] e, int iOff, int kOff, int a, int aOff, int k0)
+        private void step3_inner_s_loop(int n, Span<float> e, int iOff, int kOff, int a, int aOff, int k0)
         {
             float a0 = _a[a];
             float a1 = _a[a + 1];
@@ -439,7 +435,7 @@ internal sealed class Mdct
             }
         }
 
-        private void step3_inner_s_loop_ld654(int n, float[] e, int iOff, int baseN)
+        private void step3_inner_s_loop_ld654(int n, Span<float> e, int iOff, int baseN)
         {
             int aOff = baseN >> 3;
             float a2 = _a[aOff];
@@ -483,7 +479,7 @@ internal sealed class Mdct
             }
         }
 
-        private static void iter_54(float[] e, int z)
+        private static void iter_54(Span<float> e, int z)
         {
             float k00 = e[z] - e[z - 4];
             float y0 = e[z] + e[z - 4];
