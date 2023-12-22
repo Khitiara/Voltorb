@@ -217,7 +217,7 @@ public sealed class VorbisDecoder
             comments.Add(key, val);
         }
 
-        _comments = comments.ToFrozenDictionary(true);
+        _comments = comments.ToFrozenDictionary();
 
         if (!reader.ReadBit())
             throw new InvalidDataException();
